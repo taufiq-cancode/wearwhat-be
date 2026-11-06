@@ -314,7 +314,7 @@ func saveSizes(ctx context.Context, tx pgx.Tx, id string, sizes []string, stock 
 // addToLibrary makes newly uploaded product photos available to the post composer.
 func addToLibrary(ctx context.Context, q db.Q, brandID string, images []domain.Photo) error {
 	for _, img := range images {
-		if !strings.HasPrefix(img.URL, "/uploads/") {
+		if media.IsSample(img.URL) {
 			continue
 		}
 		if _, err := q.Exec(ctx, `INSERT INTO brand_media (id, brand_id, media)

@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/mail"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -12,23 +14,27 @@ import (
 )
 
 type Config struct {
-	Env          string
-	Port         string
-	Origins      []string
-	DatabaseURL  string
-	Location     *time.Location
-	StaticDir    string
-	UploadDir    string
-	TrustProxy   bool
-	SeedDemo     bool
-	SupportEmail string
-	DataKey      []byte
+	Env         string
+	Port        string
+	Origins     []string
+	DatabaseURL string
+	Location    *time.Location
+	StaticDir   string
+	UploadDir   string
+	// TrustedProxyHops is how many proxies sit in front of the server. 0 ignores X-Forwarded-For.
+	TrustedProxyHops int
+	SeedDemo         bool
+	SupportEmail     string
+	DataKey          []byte
 
-	SMTPHost string
-	SMTPPort string
-	SMTPUser string
-	SMTPPass string
-	SMTPFrom string
+	ResendKey  string
+	ResendBase string
+	MailFrom   string
+
+	CloudinaryCloud  string
+	CloudinaryKey    string
+	CloudinarySecret string
+	CloudinaryBase   string
 
 	TermiiKey    string
 	TermiiSender string
@@ -56,7 +62,10 @@ func (c *Config) Origin() string {
 
 func (c *Config) TestPayments() bool { return c.PaystackSecret == "" }
 func (c *Config) SMSEnabled() bool   { return c.TermiiKey != "" }
-func (c *Config) MailEnabled() bool  { return c.SMTPHost != "" }
+func (c *Config) MailEnabled() bool  { return c.ResendKey != "" }
+
+// CloudinaryEnabled is true when uploads go to Cloudinary rather than local disk.
+func (c *Config) CloudinaryEnabled() bool { return c.CloudinaryCloud != "" }
 
 func env(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
@@ -73,15 +82,14 @@ func Load() (*Config, error) {
 		DatabaseURL:  env("DATABASE_URL", ""),
 		StaticDir:    env("STATIC_DIR", ""),
 		UploadDir:    env("UPLOAD_DIR", "./data/uploads"),
-		TrustProxy:   env("TRUST_PROXY", "false") == "true",
 		SeedDemo:     env("SEED_DEMO", "false") == "true",
-		SupportEmail: env("SUPPORT_EMAIL", "support@wearwhat.com"),
+		SupportEmail: env("SUPPORT_EMAIL", "support@wearwhat.site"),
 
-		SMTPHost: env("SMTP_HOST", ""),
-		SMTPPort: env("SMTP_PORT", "587"),
-		SMTPUser: env("SMTP_USER", ""),
-		SMTPPass: env("SMTP_PASS", ""),
-		SMTPFrom: env("SMTP_FROM", "wearwhat <hello@wearwhat.com>"),
+		ResendKey:  env("RESEND_API_KEY", ""),
+		ResendBase: strings.TrimRight(env("RESEND_BASE_URL", "https://api.resend.com"), "/"),
+		MailFrom:   env("MAIL_FROM", ""),
+
+		CloudinaryBase: strings.TrimRight(env("CLOUDINARY_BASE_URL", "https://api.cloudinary.com"), "/"),
 
 		TermiiKey:    env("TERMII_API_KEY", ""),
 		TermiiSender: env("TERMII_SENDER", "wearwhat"),
@@ -113,22 +121,87 @@ func Load() (*Config, error) {
 		return nil, errors.New("FX_RATE must be a positive number")
 	}
 	c.FXRate = fx
+	if err := checkCurrency(c.PaymentCurrency, c.FXRate); err != nil {
+		return nil, err
+	}
+
+	hops, err := strconv.Atoi(env("TRUSTED_PROXY_HOPS", "0"))
+	if err != nil || hops < 0 {
+		return nil, errors.New("TRUSTED_PROXY_HOPS must be 0 or more")
+	}
+	c.TrustedProxyHops = hops
 
 	if k := env("DATA_KEY", ""); k != "" {
-		key, err := base64.StdEncoding.DecodeString(k)
-		if err != nil || len(key) != 32 {
-			return nil, errors.New("DATA_KEY must be base64 of exactly 32 bytes (openssl rand -base64 32)")
+		key, err := decodeKey(k)
+		if err != nil {
+			return nil, err
 		}
 		c.DataKey = key
 	}
 
+	if err := c.parseCloudinary(env("CLOUDINARY_URL", "")); err != nil {
+		return nil, err
+	}
+
 	return c, c.validate()
+}
+
+// checkCurrency stops a charge going out at the wrong size. Prices are stored in USD, so a
+// $120 order in NGN at the default rate of 1 would otherwise charge ₦120.
+func checkCurrency(currency string, rate float64) error {
+	if currency == "USD" && rate != 1 {
+		return errors.New("FX_RATE must be 1 when PAYMENT_CURRENCY is USD: prices are already in USD")
+	}
+	if currency != "USD" && rate == 1 {
+		return fmt.Errorf("PAYMENT_CURRENCY=%s needs FX_RATE: the number of %s per 1 USD", currency, currency)
+	}
+	return nil
+}
+
+// decodeKey accepts standard or URL-safe base64, so a generated value can't fail on encoding alone.
+func decodeKey(k string) ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(k)
+	if err != nil {
+		key, err = base64.URLEncoding.DecodeString(k)
+	}
+	if err != nil || len(key) != 32 {
+		return nil, errors.New("DATA_KEY must be base64 of exactly 32 bytes (openssl rand -base64 32)")
+	}
+	return key, nil
+}
+
+// parseCloudinary reads cloudinary://API_KEY:API_SECRET@CLOUD_NAME. Its error never repeats the
+// value, because that would print the secret in the logs.
+func (c *Config) parseCloudinary(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	bad := errors.New("CLOUDINARY_URL must look like cloudinary://API_KEY:API_SECRET@CLOUD_NAME")
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "cloudinary" || u.Hostname() == "" || u.User == nil {
+		return bad
+	}
+	secret, ok := u.User.Password()
+	if !ok || secret == "" || u.User.Username() == "" {
+		return bad
+	}
+	c.CloudinaryCloud = u.Hostname()
+	c.CloudinaryKey = u.User.Username()
+	c.CloudinarySecret = secret
+	return nil
 }
 
 // validate enforces that development conveniences can never run in production.
 func (c *Config) validate() error {
 	if c.DatabaseURL == "" {
 		return errors.New("DATABASE_URL is required")
+	}
+	if c.MailFrom != "" {
+		if _, err := mail.ParseAddress(c.MailFrom); err != nil {
+			return errors.New("MAIL_FROM must look like: wearwhat <hello@yourdomain.com>")
+		}
+	} else if c.ResendKey != "" {
+		return errors.New("RESEND_API_KEY needs MAIL_FROM: an address on a domain verified in Resend")
 	}
 	if c.IsDev() {
 		if len(c.DataKey) == 0 {
@@ -147,8 +220,14 @@ func (c *Config) validate() error {
 	if c.PaystackSecret == "" {
 		missing = append(missing, "PAYSTACK_SECRET_KEY (test payments are not allowed in production)")
 	}
-	if c.SMTPHost == "" {
-		missing = append(missing, "SMTP_HOST (verification codes must be deliverable)")
+	if c.ResendKey == "" {
+		missing = append(missing, "RESEND_API_KEY (verification codes must be deliverable)")
+	}
+	if c.MailFrom == "" {
+		missing = append(missing, "MAIL_FROM")
+	}
+	if !c.CloudinaryEnabled() {
+		missing = append(missing, "CLOUDINARY_URL (a host's local disk can be wiped on every deploy)")
 	}
 	if c.SeedDemo {
 		return errors.New("SEED_DEMO cannot be used in production")

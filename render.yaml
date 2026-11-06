@@ -1,0 +1,62 @@
+# Render Blueprint for the API and its database. In Render: New > Blueprint > this repo.
+# Render asks for each `sync: false` value once, and those values are never stored in this file.
+# The README's "Going to production" section explains each one.
+#
+# The region can't be changed later. Frankfurt is the closest to Lagos, and the service and
+# database have to share a region to use the private connection.
+#
+# TRUSTED_PROXY_HOPS is deliberately left out: add it in Render's dashboard once you've measured
+# it (see the README). A value here would overwrite that on every Blueprint sync.
+
+services:
+  - type: web
+    name: wearwhat-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: 0.5c-512mb
+    region: frankfurt
+    healthCheckPath: /healthz
+    domains:
+      - api.wearwhat.site
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: SEED_DEMO
+        value: "false"
+      - key: APP_TZ
+        value: Africa/Lagos
+      - key: DATABASE_URL
+        fromDatabase:
+          name: wearwhat-db
+          property: connectionString
+      # Encrypts documents, bank details and saved cards. Copy it somewhere safe after the first
+      # deploy: if it's lost, that data can't be recovered.
+      - key: DATA_KEY
+        generateValue: true
+      # Must be the www address: wearwhat.site redirects there, so it's the one browsers report.
+      - key: APP_ORIGIN
+        value: https://www.wearwhat.site
+      - key: MAIL_FROM
+        value: "wearwhat <hello@wearwhat.site>"
+      - key: SUPPORT_EMAIL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: CLOUDINARY_URL
+        sync: false
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PAYMENT_CURRENCY
+        sync: false
+      - key: FX_RATE
+        sync: false
+
+databases:
+  - name: wearwhat-db
+    databaseName: wearwhat
+    user: wearwhat
+    plan: 0.1c-256mb
+    region: frankfurt
+    postgresMajorVersion: "16"
+    # internal connections only
+    ipAllowList: []

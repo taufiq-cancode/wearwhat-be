@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"text/tabwriter"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"wearwhat-be/internal/config"
 	"wearwhat-be/internal/db"
 	"wearwhat-be/internal/domain"
+	"wearwhat-be/internal/media"
 	"wearwhat-be/internal/seed"
 )
 
@@ -24,7 +26,8 @@ const usage = `wearwhat admin
   brands-in-review            list brands waiting for verification
   verify-brand <handle>       approve a brand so shoppers can see it
   reject-brand <handle>       reject a brand
-  brand-document <handle>     show where a brand's private verification document is stored
+  brand-document <handle>     save a readable copy of a brand's private document in this folder
+                              (add --stdout to write it to standard output instead)
   reports                     list unresolved reports from shoppers
   resolve-report <id>         mark a report handled
   payouts-due                 what's owed to brands, refunds due, and payments needing attention
@@ -84,7 +87,7 @@ func run(cmd string, args []string) error {
 	case "reject-brand":
 		return setBrandStatus(ctx, pool, args, "rejected")
 	case "brand-document":
-		return brandDocument(ctx, pool, args, cfg.UploadDir)
+		return brandDocument(ctx, pool, cfg, args)
 	case "reports":
 		return reports(ctx, pool)
 	case "resolve-report":
@@ -163,7 +166,9 @@ func setBrandStatus(ctx context.Context, pool *pgxpool.Pool, args []string, stat
 	return nil
 }
 
-func brandDocument(ctx context.Context, pool *pgxpool.Pool, args []string, uploadDir string) error {
+func brandDocument(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config, args []string) error {
+	toStdout := slices.Contains(args, "--stdout")
+	args = slices.DeleteFunc(slices.Clone(args), func(a string) bool { return a == "--stdout" })
 	handle, err := needArg(args, "handle")
 	if err != nil {
 		return err
@@ -176,7 +181,28 @@ func brandDocument(ctx context.Context, pool *pgxpool.Pool, args []string, uploa
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s/%s (%s)\n", uploadDir, path, ctype)
+	fetch, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	data, err := media.ReadDocument(fetch, media.NewStore(cfg), cfg.DataKey, path)
+	if err != nil {
+		return err
+	}
+	if toStdout {
+		// the type goes to stderr, so it stays out of a redirected file and still reaches the terminal
+		fmt.Fprintf(os.Stderr, "This is a %s file. It's a readable copy of a private document: delete it once you've reviewed it.\n", media.Extension(ctype))
+		_, err = os.Stdout.Write(data)
+		return err
+	}
+	name := handle + "-document" + media.Extension(ctype)
+	out, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := out.Write(data); err != nil {
+		return err
+	}
+	fmt.Printf("Saved %s (%s). This is a readable copy of a private document: delete it once you've reviewed it.\n", name, ctype)
 	return nil
 }
 

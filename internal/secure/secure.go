@@ -105,13 +105,11 @@ func Encrypt(key []byte, plaintext string) (string, error) {
 	if plaintext == "" {
 		return "", nil
 	}
-	gcm, err := newGCM(key)
+	sealed, err := EncryptBytes(key, []byte(plaintext))
 	if err != nil {
 		return "", err
 	}
-	nonce := make([]byte, gcm.NonceSize())
-	mustRand(nonce)
-	return base64.RawStdEncoding.EncodeToString(gcm.Seal(nonce, nonce, []byte(plaintext), nil)), nil
+	return base64.RawStdEncoding.EncodeToString(sealed), nil
 }
 
 // Decrypt reverses Encrypt.
@@ -123,18 +121,34 @@ func Decrypt(key []byte, sealed string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	gcm, err := newGCM(key)
-	if err != nil {
-		return "", err
-	}
-	if len(raw) < gcm.NonceSize() {
-		return "", errors.New("sealed value too short")
-	}
-	plain, err := gcm.Open(nil, raw[:gcm.NonceSize()], raw[gcm.NonceSize():], nil)
+	plain, err := DecryptBytes(key, raw)
 	if err != nil {
 		return "", err
 	}
 	return string(plain), nil
+}
+
+// EncryptBytes seals data with the 32-byte key. The result carries its own nonce.
+func EncryptBytes(key, data []byte) ([]byte, error) {
+	gcm, err := newGCM(key)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	mustRand(nonce)
+	return gcm.Seal(nonce, nonce, data, nil), nil
+}
+
+// DecryptBytes reverses EncryptBytes, and fails if the key is wrong or the data was altered.
+func DecryptBytes(key, sealed []byte) ([]byte, error) {
+	gcm, err := newGCM(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(sealed) < gcm.NonceSize() {
+		return nil, errors.New("sealed value too short")
+	}
+	return gcm.Open(nil, sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():], nil)
 }
 
 func newGCM(key []byte) (cipher.AEAD, error) {

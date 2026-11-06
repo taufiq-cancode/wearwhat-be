@@ -1,0 +1,10 @@
+# A development .env must never reach an image: APP_ENV=development makes every payment succeed.
+.env
+.env.*
+!.env.example
+
+.git
+bin
+data
+*.exe
+*.test

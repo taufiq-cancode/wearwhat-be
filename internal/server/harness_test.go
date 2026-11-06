@@ -72,6 +72,8 @@ type options struct {
 	pay      payments.Provider
 	apple    string
 	appleURL string
+	// configure changes settings before the server starts
+	configure func(*config.Config)
 }
 
 func newEnv(t *testing.T, opt ...func(*options)) *env {
@@ -123,6 +125,9 @@ func newEnv(t *testing.T, opt ...func(*options)) *env {
 		FXRate:          1,
 		AppleClientID:   o.apple,
 		AppleKeysURL:    o.appleURL,
+	}
+	if o.configure != nil {
+		o.configure(cfg)
 	}
 	d := &app.Deps{DB: pool, Cfg: cfg, Log: log, Mailer: console, SMS: notify.NoSMS{}, Payments: o.pay, Now: clk.now}
 	srv := server.New(d)

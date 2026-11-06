@@ -37,7 +37,7 @@ type Server struct {
 // DefaultDeps chooses real providers when keys are set, development fallbacks otherwise.
 func DefaultDeps(cfg *config.Config, log *slog.Logger) (mailer notify.Mailer, sms notify.SMS, pay payments.Provider) {
 	if cfg.MailEnabled() {
-		mailer = &notify.SMTP{Host: cfg.SMTPHost, Port: cfg.SMTPPort, User: cfg.SMTPUser, Pass: cfg.SMTPPass, From: cfg.SMTPFrom}
+		mailer = &notify.Resend{Key: cfg.ResendKey, From: cfg.MailFrom, Base: cfg.ResendBase}
 	} else {
 		mailer = &notify.Console{Log: log}
 	}
@@ -77,7 +77,7 @@ func New(d *app.Deps) *Server {
 	commerceSvc.Routes(router)
 	inboxSvc.Routes(router)
 	studioSvc.Routes(router)
-	(&media.Service{Deps: d, Store: media.LocalDisk{Dir: d.Cfg.UploadDir}}).Routes(router)
+	(&media.Service{Deps: d, Store: media.NewStore(d.Cfg)}).Routes(router)
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := d.DB.Ping(r.Context()); err != nil {
@@ -105,7 +105,7 @@ func New(d *app.Deps) *Server {
 	var h http.Handler = mux
 	h = httpx.Origins(d.Cfg.Origins, []string{apiBase + "/webhooks/paystack"}, h)
 	h = httpx.SecurityHeaders(h)
-	h = httpx.Logging(d.Log, h)
+	h = httpx.Logging(d.Log, d.Cfg.TrustedProxyHops, h)
 	h = httpx.Recover(d.Log, h)
 
 	return &Server{

@@ -67,7 +67,7 @@ func run() error {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("wearwhat API listening", "addr", httpSrv.Addr, "env", cfg.Env, "testPayments", pay.Test(), "email", cfg.MailEnabled(), "sms", cfg.SMSEnabled())
+		log.Info("wearwhat API listening", "addr", httpSrv.Addr, "env", cfg.Env, "testPayments", pay.Test(), "email", cfg.MailEnabled(), "cloudinary", cfg.CloudinaryEnabled(), "sms", cfg.SMSEnabled())
 		errCh <- httpSrv.ListenAndServe()
 	}()
 	select {

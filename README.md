@@ -46,6 +46,14 @@ Each test gets its own Postgres schema and drives the real API over HTTP. Nothin
 
 The browser tests live in `../wearwhat/e2e`. Start this server with demo data, start the frontend, then run `npx playwright test` there.
 
+Resend and Cloudinary also have tests that use your real accounts. They're skipped unless you turn them on, and they need your keys in `.env`:
+
+```bash
+LIVE_TESTS=1 go test ./internal/notify ./internal/media -run Live -v
+```
+
+The email test sends one message to `LIVE_TEST_EMAIL`. The Cloudinary tests upload an image, a video and a private file, check them, then delete them.
+
 ## What works without any keys
 
 Everything runs with no third-party accounts. Each service switches on when its keys are set:
@@ -53,40 +61,121 @@ Everything runs with no third-party accounts. Each service switches on when its 
 | Service | With keys | Without keys (development) |
 |---|---|---|
 | Payments | `PAYSTACK_SECRET_KEY`: Paystack's hosted checkout, signed webhooks, saved cards | Test mode, clearly labelled in the app; every payment succeeds and no money moves |
-| Email | `SMTP_HOST` and friends: real delivery | Printed to the console. Sign-up codes also show on screen, and recent messages are at `GET /api/v1/dev/outbox` |
+| Email | `RESEND_API_KEY` and `MAIL_FROM`: delivery through Resend | Printed to the console. Sign-up codes also show on screen, and recent messages are at `GET /api/v1/dev/outbox` |
+| Uploads | `CLOUDINARY_URL`: images, videos and encrypted documents on Cloudinary | Saved in `UPLOAD_DIR` and served from `/uploads/:id` |
 | SMS | `TERMII_API_KEY`: phone sign-up | Phone sign-up is hidden |
 | Apple sign-in | `APPLE_CLIENT_ID`: verified against Apple's keys | The button is hidden |
 
 `.env.example` describes every setting.
 
-**These integrations have only been tested against local fake servers,** not the real services. Before going live, run a real test transaction with Paystack test keys and send yourself real email and SMS.
+**Paystack, Termii and Apple have only been tested against local fake servers,** not the real services. Run the live tests above for Resend and Cloudinary, and before going live make a real test transaction with Paystack test keys.
 
 ## Going to production
 
-`APP_ENV` must be left unset or set to anything other than `development`. The server then refuses to start without `DATA_KEY`, `APP_ORIGIN`, `PAYSTACK_SECRET_KEY` and `SMTP_HOST`, and refuses `SEED_DEMO`. Test payments, on-screen codes and `/dev/outbox` can't run in production.
+This describes hosting on Render, using `render.yaml`, with DNS at Namecheap. In production mode the server refuses to start without `DATA_KEY`, `APP_ORIGIN`, `PAYSTACK_SECRET_KEY`, `RESEND_API_KEY`, `MAIL_FROM` and `CLOUDINARY_URL`, and refuses `SEED_DEMO`. Test payments, on-screen codes and `/dev/outbox` can't run in production. Leaving `APP_ENV` unset also counts as production.
 
-- **Serve the frontend:** build it with `npm run build`, then set `STATIC_DIR` to its `dist` folder. The server handles the SPA fallback. If the API is on a different origin, set `VITE_API_URL` when building and list the app's origin in `APP_ORIGIN`.
-- **Webhooks:** point Paystack at `https://your-domain/api/v1/webhooks/paystack`.
-- **Currency:** prices are stored in USD. If your Paystack account can't charge USD, set `PAYMENT_CURRENCY` and `FX_RATE`. The rate is fixed until you change it, so decide how you'll keep it current.
+The frontend is the Render static site `wearwhat-fe`, on `https://www.wearwhat.site`. The API goes on `https://api.wearwhat.site`.
+
+**`APP_ORIGIN` must be the `www` address.** `wearwhat.site` redirects there, so it's the address browsers report, and the API refuses requests from any other. `render.yaml` already sets this.
+
+**The two must share a domain.** The login cookie isn't sent between different sites, and Render's `onrender.com` addresses count as different sites from each other, so login fails on those addresses.
+
+### 1. Set up the services
+
+1. **Resend:** add the domain `wearwhat.site` and create an API key. Resend then shows the DNS records you'll add in step 3. Until the domain is verified, Resend won't deliver to anyone except you.
+2. **Cloudinary:** copy the `CLOUDINARY_URL` value from the dashboard's API Keys page.
+3. **Paystack:** copy your secret key. Start with the test key (`sk_test_...`).
+
+### 2. Create the API on Render
+
+In Render, choose New > Blueprint and pick this repo. Render creates the API and its database, adds the `api.wearwhat.site` domain, and asks for these values:
+
+| Setting | Value |
+|---|---|
+| `SUPPORT_EMAIL` | An inbox you read. It's shown to people who need help |
+| `RESEND_API_KEY` | From Resend |
+| `CLOUDINARY_URL` | From Cloudinary |
+| `PAYSTACK_SECRET_KEY` | From Paystack |
+| `PAYMENT_CURRENCY`, `FX_RATE` | `USD` and `1`, or for example `NGN` and `1500` |
+
+**Prices are stored in USD.** If your Paystack account can't charge USD, set the currency and rate. The rate stays fixed until you change it, so decide how you'll keep it current. The server refuses to start if the two don't make sense together.
+
+**After the first deploy, copy `DATA_KEY` from the service's Environment page into a password manager.** It encrypts documents, bank accounts, national ID numbers and saved-card tokens. Losing it makes them unreadable, and there's no rotation command yet.
+
+### 3. Add the DNS records
+
+In Namecheap, open Domain List > Manage > Advanced DNS and add these:
+
+| Type | Host | Value | For |
+|---|---|---|---|
+| CNAME | `api` | The `onrender.com` address of `wearwhat-api`, shown in Render | The API |
+| MX | `send` | From Resend, priority 10 | Resend |
+| TXT | `send` | From Resend | Resend |
+| TXT | `resend._domainkey` | From Resend | Resend |
+| A | `@` | `216.24.57.1` | Replaces the CNAME on `@`. Render and Namecheap both say not to use one there, because it can interfere with mail to the domain |
+
+The MX record goes under Mail Settings, after you choose **Custom MX**. The domain was set to Email Forwarding when this was written, and neither Namecheap nor Resend documents a way to keep both. **Expect any forwarding from `@wearwhat.site` addresses to stop,** so check your forwarding rules first and send a test message afterwards.
+
+### 4. Point the frontend at it
+
+On the `wearwhat-fe` service in Render:
+
+1. Set `VITE_API_URL=https://api.wearwhat.site`.
+2. Under Redirects/Rewrites, add a rule with source `/*`, destination `/index.html` and action Rewrite. Without it, every address except the home page shows "Not Found", including links in emails and the return from Paystack.
+3. Redeploy, because `VITE_API_URL` is built into the app.
+
+### 5. Finish setup
+
+**Paystack webhook:** set it to `https://api.wearwhat.site/api/v1/webhooks/paystack`. Test and live mode each have their own.
+
+**Find the proxy setting.** Rate limits need each visitor's real address, and that depends on how many proxies sit in front of the server. Run this from your own computer:
+
+```bash
+curl -H "X-Forwarded-For: 1.2.3.4" https://api.wearwhat.site/healthz
+```
+
+Then find that request in the service's logs in Render and read its `ip=` value. Add `TRUSTED_PROXY_HOPS` in the dashboard, starting at `1` and going up until `ip=` shows your real address (a search for "what is my IP" will tell you). It must never show `1.2.3.4`: that would mean anyone can fake their address.
+
+With the default of `0`, every visitor looks like the same address, so they all share one rate limit.
+
+### 6. Check it, then go live
+
+```bash
+curl https://api.wearwhat.site/healthz        # {"status":"ok"}
+curl https://api.wearwhat.site/api/v1/config  # "devMode":false and "testPayments":false
+```
+
+Using the test Paystack key, sign up with a real email address, create a brand and approve it, add a product with a photo, buy it with a Paystack test card, then ship and deliver it.
+
+For launch, switch to a fresh database and live Paystack keys. Otherwise your test orders will show up in `payouts-due`.
+
+### Limits to watch
+
+- **Resend's free plan** allows 100 emails a day, and sign-up codes share that with order emails and the weekly digest. A digest to more than about 100 people could block sign-ups until the next day, so upgrade before you reach that size.
 - **Apple Pay** also needs your domain registered through Paystack.
-- **Behind a proxy:** set `TRUST_PROXY=true` so rate limits see real client addresses. Only do this if the proxy overwrites `X-Forwarded-For`.
-- **Uploads** are stored on local disk in `UPLOAD_DIR`, so back that folder up, or implement the `media.Storage` interface for S3.
-- **`DATA_KEY`** encrypts bank accounts, national ID numbers and saved-card tokens. Losing it makes them unreadable, and there's no rotation command yet.
 
 ## Operating it
 
-There are no admin screens yet. These tasks use the CLI, which reads the same `.env`:
+There are no admin screens yet. These tasks use the admin tool. On Render, open the service's Shell tab and run `cd /app` first. Locally, use `go run ./cmd/wearwhat` in place of `./wearwhat`, which reads `.env`.
 
 ```bash
-go run ./cmd/wearwhat                          # lists every command
-go run ./cmd/wearwhat brands-in-review
-go run ./cmd/wearwhat brand-document <handle>  # where their private ID document is stored
-go run ./cmd/wearwhat verify-brand <handle>    # they stay hidden from shoppers until this
-go run ./cmd/wearwhat reports                  # what shoppers have reported
-go run ./cmd/wearwhat payouts-due              # what you owe brands, refunds due, payments to check
-go run ./cmd/wearwhat mark-payout-paid <handle>
-go run ./cmd/wearwhat mark-refund-done <order>
+./wearwhat                          # lists every command
+./wearwhat brands-in-review
+./wearwhat brand-document <handle>  # saves a readable copy of their private document in this folder
+./wearwhat verify-brand <handle>    # they stay hidden from shoppers until this
+./wearwhat reports                  # what shoppers have reported
+./wearwhat payouts-due              # what you owe brands, refunds due, payments to check
+./wearwhat mark-payout-paid <handle>
+./wearwhat mark-refund-done <order>
 ```
+
+**Reviewing a brand's document.** Documents are encrypted before they reach Cloudinary, so downloading one from Cloudinary's dashboard only gets you scrambled data. A copy saved in Render's Shell stays on the server, where you can't open it. To bring it to your computer, add your SSH key to your Render account and run this from Git Bash, using the SSH address on the service's Connect menu:
+
+```bash
+ssh <service-address> "cd /app && ./wearwhat brand-document <handle> --stdout" > document.pdf
+```
+
+Use Git Bash or Command Prompt for this, not Windows PowerShell, whose `>` corrupts binary files. The command prints the file's real type, because some documents are photos rather than PDFs, so rename it if needed. Delete your copy once you've reviewed it.
 
 **Money movement is deliberately manual.** The system calculates and records what's owed, but you send payouts and refunds yourself, then record them with the last two commands.
 
@@ -108,9 +197,9 @@ internal/
   commerce/       bag, promos, checkout, payment, orders, returns, reviews
   inbox/          conversations and notifications
   studio/         the brand side: onboarding, orders, catalog, drops, metrics, team
-  media/          uploads
+  media/          uploads: Cloudinary, or local disk in development
   payments/       Paystack and the test provider
-  notify/         email and SMS
+  notify/         email (Resend) and SMS (Termii)
   jobs/           scheduled posts, drop releases, expiring checkouts, digest, cleanup
   seed/           demo data
 ```

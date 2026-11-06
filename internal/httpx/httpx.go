@@ -205,12 +205,13 @@ func Recover(log *slog.Logger, next http.Handler) http.Handler {
 }
 
 // Logging logs each request. Query strings are left out because reset tokens can appear in them.
-func Logging(log *slog.Logger, next http.Handler) http.Handler {
+// The address is the one rate limits see, which is how to check TRUSTED_PROXY_HOPS after a deploy.
+func Logging(log *slog.Logger, proxyHops int, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(sw, r)
-		log.Info("http", "method", r.Method, "path", r.URL.Path, "status", sw.status, "ms", time.Since(start).Milliseconds())
+		log.Info("http", "method", r.Method, "path", r.URL.Path, "status", sw.status, "ms", time.Since(start).Milliseconds(), "ip", ClientIP(r, proxyHops))
 	})
 }
 
@@ -223,6 +224,9 @@ func (s *statusWriter) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap lets http.ResponseController reach the real connection, to extend upload deadlines.
+func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 // SecurityHeaders sets safe defaults on every response.
 func SecurityHeaders(next http.Handler) http.Handler {
@@ -269,12 +273,17 @@ func sameHost(origin, host string) bool {
 	return ok && rest == host
 }
 
-// ClientIP is the caller's address. X-Forwarded-For is only honoured behind a trusted proxy.
-func ClientIP(r *http.Request, trustProxy bool) string {
-	if trustProxy {
-		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			first, _, _ := strings.Cut(fwd, ",")
-			return strings.TrimSpace(first)
+// ClientIP is the caller's address. Proxies add to the end of X-Forwarded-For and a client can
+// put anything at the start, so it's counted from the right: proxyHops is how many proxies we
+// run behind, and 0 ignores the header. A list too short, or an entry that isn't an address,
+// falls back to the connection's address.
+func ClientIP(r *http.Request, proxyHops int) string {
+	if proxyHops > 0 {
+		entries := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
+		if i := len(entries) - proxyHops; i >= 0 {
+			if ip := strings.TrimSpace(entries[i]); net.ParseIP(ip) != nil {
+				return ip
+			}
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)

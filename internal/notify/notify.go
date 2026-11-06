@@ -4,14 +4,15 @@ package notify
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
-	"mime"
-	"net"
 	"net/http"
-	"net/mail"
-	"net/smtp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -71,29 +72,100 @@ func (c *Console) Outbox(to string) []Message {
 	return out
 }
 
-/* ---------- SMTP ---------- */
+/* ---------- Resend ---------- */
 
-type SMTP struct {
-	Host, Port, User, Pass, From string
+const (
+	resendAttempts = 3
+	resendMaxWait  = 5 * time.Second
+)
+
+// Resend sends email through Resend's HTTPS API.
+type Resend struct {
+	Key, From, Base string
+	Client          *http.Client
+	// Backoff is the wait before the first retry, doubling after that. Tests shorten it.
+	Backoff time.Duration
 }
 
-// Send implements Mailer over SMTP with STARTTLS where the server offers it.
-func (s *SMTP) Send(_ context.Context, to, subject, body string) error {
-	from, err := mail.ParseAddress(s.From)
+// Send implements Mailer. Rate limits and server errors are retried. The same idempotency key
+// goes with every attempt, so a retry can't deliver the message twice.
+func (s *Resend) Send(ctx context.Context, to, subject, body string) error {
+	payload, err := json.Marshal(map[string]any{"from": s.From, "to": []string{to}, "subject": subject, "text": body})
 	if err != nil {
-		return fmt.Errorf("SMTP_FROM: %w", err)
+		return err
 	}
-	if strings.ContainsAny(to, "\r\n") || strings.ContainsAny(subject, "\r\n") {
-		return fmt.Errorf("refusing header injection in email to %q", to)
+	key, err := idempotencyKey()
+	if err != nil {
+		return err
 	}
-	var msg bytes.Buffer
-	fmt.Fprintf(&msg, "From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n",
-		s.From, to, mime.QEncoding.Encode("utf-8", subject), body)
-	var auth smtp.Auth
-	if s.User != "" {
-		auth = smtp.PlainAuth("", s.User, s.Pass, s.Host)
+	wait := s.Backoff
+	if wait == 0 {
+		wait = time.Second
 	}
-	return smtp.SendMail(net.JoinHostPort(s.Host, s.Port), auth, from.Address, []string{to}, msg.Bytes())
+	for attempt := 1; ; attempt++ {
+		retry, after, err := s.post(ctx, payload, key)
+		if err == nil || !retry || attempt == resendAttempts {
+			return err
+		}
+		pause := wait
+		if after > 0 {
+			pause = after
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w (gave up while retrying: %v)", err, ctx.Err())
+		case <-time.After(min(pause, resendMaxWait)):
+		}
+		wait *= 2
+	}
+}
+
+// post makes one attempt. It reports whether a failure is worth retrying, and how long the
+// server asked us to wait. Errors leave out the recipient, because they end up in the logs.
+func (s *Resend) post(ctx context.Context, payload []byte, key string) (retry bool, after time.Duration, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.Base+"/emails", bytes.NewReader(payload))
+	if err != nil {
+		return false, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.Key)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", key)
+	req.Header.Set("User-Agent", "wearwhat-be")
+	client := s.Client
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return false, 0, err
+		}
+		return true, 0, fmt.Errorf("resend: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 300 {
+		_, _ = io.Copy(io.Discard, res.Body)
+		return false, 0, nil
+	}
+	var problem struct {
+		Name    string `json:"name"`
+		Message string `json:"message"`
+	}
+	_ = json.NewDecoder(io.LimitReader(res.Body, 1<<16)).Decode(&problem)
+	err = fmt.Errorf("resend: status %d: %s: %s", res.StatusCode, problem.Name, problem.Message)
+	if res.StatusCode == http.StatusTooManyRequests || res.StatusCode >= 500 {
+		seconds, _ := strconv.Atoi(res.Header.Get("Retry-After"))
+		return true, time.Duration(seconds) * time.Second, err
+	}
+	return false, 0, err
+}
+
+func idempotencyKey() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 /* ---------- Termii SMS ---------- */

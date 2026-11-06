@@ -125,7 +125,7 @@ func (s *Service) pendingUser(r *http.Request) (string, error) {
 	return id, err
 }
 
-func (s *Service) ip(r *http.Request) string { return httpx.ClientIP(r, s.Cfg.TrustProxy) }
+func (s *Service) ip(r *http.Request) string { return httpx.ClientIP(r, s.Cfg.TrustedProxyHops) }
 
 // perIP scales a per-address limit: in development every request comes from one machine.
 func (s *Service) perIP(limit int) int {

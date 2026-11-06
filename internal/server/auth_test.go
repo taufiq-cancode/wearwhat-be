@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
@@ -237,7 +238,11 @@ func TestConfigRefusesUnsafeProduction(t *testing.T) {
 		"APP_ORIGIN":          "https://wearwhat.com",
 		"DATA_KEY":            base64.StdEncoding.EncodeToString(make([]byte, 32)),
 		"PAYSTACK_SECRET_KEY": "sk_live_x",
-		"SMTP_HOST":           "smtp.test",
+		"RESEND_API_KEY":      "re_x",
+		"MAIL_FROM":           "wearwhat <hello@wearwhat.com>",
+		"CLOUDINARY_URL":      "cloudinary://key:not-a-real-secret@demo",
+		"PAYMENT_CURRENCY":    "USD",
+		"FX_RATE":             "1",
 	}
 	set := func(t *testing.T, without string, extra map[string]string) {
 		for k, v := range base {
@@ -257,7 +262,7 @@ func TestConfigRefusesUnsafeProduction(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	for _, missing := range []string{"PAYSTACK_SECRET_KEY", "DATA_KEY", "SMTP_HOST", "APP_ORIGIN"} {
+	for _, missing := range []string{"PAYSTACK_SECRET_KEY", "DATA_KEY", "RESEND_API_KEY", "MAIL_FROM", "CLOUDINARY_URL", "APP_ORIGIN"} {
 		t.Run("needs "+missing, func(t *testing.T) {
 			set(t, missing, nil)
 			if _, err := config.Load(); err == nil {
@@ -265,6 +270,62 @@ func TestConfigRefusesUnsafeProduction(t *testing.T) {
 			}
 		})
 	}
+	t.Run("settings that would go wrong are refused", func(t *testing.T) {
+		for name, bad := range map[string]map[string]string{
+			"naira at the default rate charges ₦120 for $120": {"PAYMENT_CURRENCY": "NGN"},
+			"dollars with a rate would overcharge":            {"FX_RATE": "1500"},
+			"negative proxy count":                            {"TRUSTED_PROXY_HOPS": "-1"},
+			"proxy count that isn't a number":                 {"TRUSTED_PROXY_HOPS": "true"},
+			"sender that isn't an address":                    {"MAIL_FROM": "wearwhat"},
+			"short data key":                                  {"DATA_KEY": "c2hvcnQ="},
+		} {
+			set(t, "", bad)
+			if _, err := config.Load(); err == nil {
+				t.Errorf("%s: started anyway", name)
+			}
+		}
+	})
+	t.Run("a bad CLOUDINARY_URL is refused without printing the secret", func(t *testing.T) {
+		for _, bad := range []string{"cloudinary://key@demo", "cloudinary://key:not-a-real-secret@", "https://key:not-a-real-secret@demo"} {
+			set(t, "", map[string]string{"CLOUDINARY_URL": bad})
+			_, err := config.Load()
+			if err == nil {
+				t.Errorf("%q: started anyway", bad)
+			} else if strings.Contains(err.Error(), "not-a-real-secret") {
+				t.Errorf("%q: the error printed the secret: %v", bad, err)
+			}
+		}
+	})
+	t.Run("naira with a real rate is fine", func(t *testing.T) {
+		set(t, "", map[string]string{"PAYMENT_CURRENCY": "NGN", "FX_RATE": "1500"})
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.FXRate != 1500 {
+			t.Errorf("rate: %v", cfg.FXRate)
+		}
+	})
+	t.Run("the Cloudinary setting is read correctly", func(t *testing.T) {
+		set(t, "", nil)
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.CloudinaryCloud != "demo" || cfg.CloudinaryKey != "key" || cfg.CloudinarySecret != "not-a-real-secret" {
+			t.Errorf("parsed as %q %q %q", cfg.CloudinaryCloud, cfg.CloudinaryKey, cfg.CloudinarySecret)
+		}
+	})
+	t.Run("a data key in URL-safe base64 works", func(t *testing.T) {
+		key := base64.URLEncoding.EncodeToString(bytes.Repeat([]byte{0xfb}, 32))
+		if !strings.ContainsAny(key, "-_") {
+			t.Fatalf("test key %q isn't URL-safe-only", key)
+		}
+		set(t, "", map[string]string{"DATA_KEY": key})
+		if _, err := config.Load(); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("demo seed refused", func(t *testing.T) {
 		set(t, "", map[string]string{"SEED_DEMO": "true"})
 		if _, err := config.Load(); err == nil {
