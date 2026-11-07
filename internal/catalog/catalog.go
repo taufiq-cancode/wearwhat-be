@@ -39,9 +39,20 @@ func (s *Service) Routes(r *httpx.Router) {
 
 /* ---------- brands ---------- */
 
+const brandCardCols = `SELECT id, handle, name, initials, avatar, CASE WHEN description <> '' THEN description ELSE meta END FROM brands`
+
+// brands lists the most-followed verified brands, or with ?q= the ones whose name or handle matches,
+// so a brand can be found before it has any products.
 func (s *Service) brands(_ http.ResponseWriter, r *http.Request) (any, error) {
-	rows, err := s.DB.Query(r.Context(), `SELECT id, handle, name, initials, avatar, CASE WHEN description <> '' THEN description ELSE meta END
-		FROM brands WHERE status = 'verified' ORDER BY followers DESC, name LIMIT 20`)
+	q := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q"))), "@")
+	var rows pgx.Rows
+	var err error
+	if q == "" {
+		rows, err = s.DB.Query(r.Context(), brandCardCols+` WHERE status = 'verified' ORDER BY followers DESC, name LIMIT 20`)
+	} else {
+		rows, err = s.DB.Query(r.Context(), brandCardCols+` WHERE status = 'verified' AND strpos(lower(name || ' ' || handle), $1) > 0
+			ORDER BY (handle = $1) DESC, followers DESC, name LIMIT 10`, q)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -89,16 +100,17 @@ func (s *Service) brand(_ http.ResponseWriter, r *http.Request) (any, error) {
 		return nil, err
 	}
 	own := who.BrandID == b.ID
-	// a brand under review isn't public yet, but its own team can preview the storefront
-	if status != "verified" && !own {
+	// a brand under review isn't public yet, but its own team and admins reviewing it can preview the storefront
+	preview := own || who.Admin
+	if status != "verified" && !preview {
 		return nil, httpx.NotFound("Brand not found")
 	}
 	b.Verified = status == "verified"
 	b.CanMessage = accepts && !own
 
-	// the owner also sees pieces held back for a drop that hasn't released
+	// a preview also shows pieces held back for a drop that hasn't released
 	cond := `WHERE p.brand_id = $1 AND ` + views.ProductVisible
-	if own {
+	if preview {
 		cond = `WHERE p.brand_id = $1 AND NOT p.hidden`
 	}
 	products, err := views.ProductsWhere(ctx, s.DB, cond+` ORDER BY p.created_at DESC, p.id`, b.ID)

@@ -61,12 +61,13 @@ func (s *Service) Authenticate(r *http.Request) (*httpx.Principal, error) {
 	var p httpx.Principal
 	var pending bool
 	var expires time.Time
-	err = s.DB.QueryRow(r.Context(), `SELECT u.id, u.handle, s.pending, s.expires_at,
+	// is_admin is read on every request, so removing an admin takes effect immediately
+	err = s.DB.QueryRow(r.Context(), `SELECT u.id, u.handle, u.is_admin, s.pending, s.expires_at,
 			COALESCE(t.brand_id, ''), COALESCE(t.role, '')
 		FROM sessions s JOIN users u ON u.id = s.user_id
 		LEFT JOIN team_members t ON t.user_id = u.id AND t.status = 'active'
 		WHERE s.token_hash = $1 AND s.expires_at > now()`, hash).
-		Scan(&p.UserID, &p.Handle, &pending, &expires, &p.BrandID, &p.BrandRole)
+		Scan(&p.UserID, &p.Handle, &p.Admin, &pending, &expires, &p.BrandID, &p.BrandRole)
 	if db.IsNotFound(err) {
 		return nil, nil
 	}

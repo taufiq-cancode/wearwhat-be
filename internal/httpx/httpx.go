@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"runtime/debug"
@@ -42,6 +43,8 @@ type Principal struct {
 	Handle    string
 	BrandID   string
 	BrandRole string // OWNER | Admin | Orders | Content
+	// Admin runs the wearwhat admin panel. It has nothing to do with the brand team role "Admin".
+	Admin bool
 }
 
 // capability groups a team role can be limited to.
@@ -99,18 +102,38 @@ type Router struct {
 	Base string // e.g. /api/v1
 }
 
+type level int
+
+const (
+	levelPublic level = iota
+	levelUser
+	levelBrand
+	levelAdmin
+)
+
 // Public routes are open, but still resolve the principal when a session exists.
-func (rt *Router) Public(pattern string, h Handler) { rt.add(pattern, h, false, "", false) }
+func (rt *Router) Public(pattern string, h Handler) { rt.add(pattern, h, levelPublic, "") }
 
 // User routes need a signed-in account (401 otherwise).
-func (rt *Router) User(pattern string, h Handler) { rt.add(pattern, h, true, "", false) }
+func (rt *Router) User(pattern string, h Handler) { rt.add(pattern, h, levelUser, "") }
 
 // Brand routes need a signed-in account on a brand team with the capability (403 otherwise).
 func (rt *Router) Brand(pattern, capability string, h Handler) {
-	rt.add(pattern, h, true, capability, true)
+	rt.add(pattern, h, levelBrand, capability)
 }
 
-func (rt *Router) add(pattern string, h Handler, needUser bool, capability string, needBrand bool) {
+// Admin routes need a signed-in admin. Anyone else gets 404, so the panel isn't advertised.
+func (rt *Router) Admin(pattern string, h Handler) { rt.add(pattern, h, levelAdmin, "") }
+
+// File is a handler result sent as raw bytes rather than JSON. It's never cached, because
+// files sent this way are private.
+type File struct {
+	ContentType string
+	Name        string
+	Data        []byte
+}
+
+func (rt *Router) add(pattern string, h Handler, lvl level, capability string) {
 	method, path, ok := strings.Cut(pattern, " ")
 	if !ok {
 		panic("route needs a method: " + pattern)
@@ -121,11 +144,15 @@ func (rt *Router) add(pattern string, h Handler, needUser bool, capability strin
 			rt.fail(w, r, err)
 			return
 		}
-		if needUser && p == nil {
+		if lvl != levelPublic && p == nil {
 			WriteJSON(w, http.StatusUnauthorized, map[string]any{"error": "Sign in to continue"})
 			return
 		}
-		if needBrand {
+		if lvl == levelAdmin && !p.Admin {
+			WriteJSON(w, http.StatusNotFound, map[string]any{"error": "Not found"})
+			return
+		}
+		if lvl == levelBrand {
 			if p.BrandID == "" {
 				WriteJSON(w, http.StatusForbidden, map[string]any{"error": "Set up your brand first"})
 				return
@@ -143,6 +170,10 @@ func (rt *Router) add(pattern string, h Handler, needUser bool, capability strin
 		}
 		if isNil(out) {
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if f, ok := out.(*File); ok {
+			writeFile(w, f)
 			return
 		}
 		WriteJSON(w, http.StatusOK, out)
@@ -171,6 +202,18 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		slog.Default().Debug("write response", "err", err)
+	}
+}
+
+func writeFile(w http.ResponseWriter, f *File) {
+	h := w.Header()
+	h.Set("Content-Type", f.ContentType)
+	h.Set("Content-Length", fmt.Sprint(len(f.Data)))
+	h.Set("Cache-Control", "no-store")
+	h.Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": f.Name}))
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(f.Data); err != nil {
+		slog.Default().Debug("write file", "err", err)
 	}
 }
 

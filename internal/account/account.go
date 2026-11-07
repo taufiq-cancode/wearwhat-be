@@ -51,11 +51,12 @@ func (s *Service) Me(ctx context.Context, userID string) (domain.Me, error) {
 			(SELECT count(*) FROM posts p WHERE p.user_id = u.id AND p.status = 'published'),
 			(SELECT count(*) FROM post_saves ps WHERE ps.user_id = u.id),
 			(SELECT count(*) FROM orders o WHERE o.user_id = u.id AND `+views.PaidOrder+`),
-			COALESCE((SELECT pm.label || CASE WHEN pm.detail <> '' THEN ' · ' || pm.detail ELSE '' END FROM payment_methods pm WHERE pm.user_id = u.id AND pm.is_default), '')
+			COALESCE((SELECT pm.label || CASE WHEN pm.detail <> '' THEN ' · ' || pm.detail ELSE '' END FROM payment_methods pm WHERE pm.user_id = u.id AND pm.is_default), ''),
+			u.is_admin
 		FROM users u WHERE u.id = $1`, userID).Scan(
 		&m.ID, &m.Handle, &m.Name, &m.Email, &m.Phone, &m.Bio, &m.Avatar,
 		&m.Followers, &m.Following, &m.Prefs, &m.Fit, &m.Styles, &m.ShopFor,
-		&m.WearsCount, &m.SavedCount, &m.OrdersCount, &m.PaymentLabel)
+		&m.WearsCount, &m.SavedCount, &m.OrdersCount, &m.PaymentLabel, &m.Admin)
 	if err != nil {
 		return m, err
 	}

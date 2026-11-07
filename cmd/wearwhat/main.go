@@ -1,4 +1,5 @@
 // Command wearwhat is the admin tool: brand verification, moderation and what's owed to whom.
+// The admin panel at /admin does the same work; both go through internal/admin.
 package main
 
 import (
@@ -8,14 +9,13 @@ import (
 	"os"
 	"slices"
 	"text/tabwriter"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 
+	"wearwhat-be/internal/admin"
 	"wearwhat-be/internal/config"
 	"wearwhat-be/internal/db"
-	"wearwhat-be/internal/domain"
 	"wearwhat-be/internal/media"
 	"wearwhat-be/internal/seed"
 )
@@ -23,6 +23,9 @@ import (
 const usage = `wearwhat admin
 
   seed --reset                wipe the database and reload demo data (development only)
+  make-admin <email>          let this account use the admin panel at /admin
+  remove-admin <email>        take admin away from this account
+  admins                      list who can use the admin panel
   brands-in-review            list brands waiting for verification
   verify-brand <handle>       approve a brand so shoppers can see it
   reject-brand <handle>       reject a brand
@@ -80,12 +83,18 @@ func run(cmd string, args []string) error {
 		}
 		fmt.Println("Demo data loaded. Sign in as amara@kalu.co with password", seed.DemoPassword)
 		return nil
+	case "make-admin":
+		return setAdmin(ctx, pool, args, true)
+	case "remove-admin":
+		return setAdmin(ctx, pool, args, false)
+	case "admins":
+		return admins(ctx, pool)
 	case "brands-in-review":
 		return brandsInReview(ctx, pool)
 	case "verify-brand":
-		return setBrandStatus(ctx, pool, args, "verified")
+		return setBrandStatus(ctx, pool, args, admin.Verified)
 	case "reject-brand":
-		return setBrandStatus(ctx, pool, args, "rejected")
+		return setBrandStatus(ctx, pool, args, admin.Rejected)
 	case "brand-document":
 		return brandDocument(ctx, pool, cfg, args)
 	case "reports":
@@ -110,34 +119,49 @@ func needArg(args []string, name string) (string, error) {
 	return args[0], nil
 }
 
-func brandsInReview(ctx context.Context, pool *pgxpool.Pool) error {
-	rows, err := pool.Query(ctx, `SELECT handle, name, business ->> 'legalName', business ->> 'type', created_at FROM brands WHERE status = 'in_review' ORDER BY created_at`)
+func table() *tabwriter.Writer { return tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0) }
+
+func setAdmin(ctx context.Context, pool *pgxpool.Pool, args []string, on bool) error {
+	email, err := needArg(args, "email")
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "HANDLE\tNAME\tLEGAL NAME\tTYPE\tSUBMITTED")
-	for rows.Next() {
-		var handle, name string
-		var legal, kind *string
-		var at time.Time
-		if err := rows.Scan(&handle, &name, &legal, &kind, &at); err != nil {
-			return err
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", handle, name, deref(legal), deref(kind), at.Format("2006-01-02"))
-	}
-	if err := rows.Err(); err != nil {
+	handle, err := admin.SetAdmin(ctx, pool, admin.CLI, email, on)
+	if err != nil {
 		return err
+	}
+	if on {
+		fmt.Printf("@%s is now an admin. Sign in as them and open /admin.\n", handle)
+	} else {
+		fmt.Printf("@%s is no longer an admin\n", handle)
+	}
+	return nil
+}
+
+func admins(ctx context.Context, pool *pgxpool.Pool) error {
+	list, err := admin.Admins(ctx, pool)
+	if err != nil {
+		return err
+	}
+	w := table()
+	fmt.Fprintln(w, "HANDLE\tNAME\tEMAIL")
+	for _, a := range list {
+		fmt.Fprintf(w, "@%s\t%s\t%s\n", a.Handle, a.Name, a.Email)
 	}
 	return w.Flush()
 }
 
-func deref(s *string) string {
-	if s == nil {
-		return ""
+func brandsInReview(ctx context.Context, pool *pgxpool.Pool) error {
+	list, err := admin.Brands(ctx, pool, admin.InReview)
+	if err != nil {
+		return err
 	}
-	return *s
+	w := table()
+	fmt.Fprintln(w, "HANDLE\tNAME\tLEGAL NAME\tTYPE\tSUBMITTED")
+	for _, b := range list {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", b.Handle, b.Name, b.LegalName, b.Type, b.SubmittedAt.Format("2006-01-02"))
+	}
+	return w.Flush()
 }
 
 func setBrandStatus(ctx context.Context, pool *pgxpool.Pool, args []string, status string) error {
@@ -145,21 +169,8 @@ func setBrandStatus(ctx context.Context, pool *pgxpool.Pool, args []string, stat
 	if err != nil {
 		return err
 	}
-	var name string
-	var brandID string
-	err = pool.QueryRow(ctx, `UPDATE brands SET status = $2, verified_at = CASE WHEN $2 = 'verified' THEN now() ELSE NULL END WHERE handle = $1 RETURNING id, name`, handle, status).Scan(&brandID, &name)
-	if db.IsNotFound(err) {
-		return fmt.Errorf("no brand @%s", handle)
-	}
+	name, err := admin.SetBrandStatus(ctx, pool, admin.CLI, handle, status, "")
 	if err != nil {
-		return err
-	}
-	text := "Your store is verified and live on wearwhat."
-	if status == "rejected" {
-		text = "We couldn’t verify your store. Contact support to review your documents."
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO notifications (id, scope, brand_id, who, text, kind, href)
-		VALUES ('n_' || replace(gen_random_uuid()::text, '-', ''), 'studio', $1, 'wearwhat', $2, 'Orders', '/studio/settings')`, brandID, text); err != nil {
 		return err
 	}
 	fmt.Printf("%s is now %s\n", name, status)
@@ -173,58 +184,37 @@ func brandDocument(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config, 
 	if err != nil {
 		return err
 	}
-	var path, ctype string
-	err = pool.QueryRow(ctx, `SELECT u.path, u.content_type FROM brands b JOIN uploads u ON u.id = b.business ->> 'documentId' WHERE b.handle = $1`, handle).Scan(&path, &ctype)
-	if db.IsNotFound(err) {
-		return fmt.Errorf("no document on file for @%s", handle)
-	}
-	if err != nil {
-		return err
-	}
-	fetch, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	data, err := media.ReadDocument(fetch, media.NewStore(cfg), cfg.DataKey, path)
+	doc, err := admin.Document(ctx, pool, media.NewStore(cfg), cfg.DataKey, handle)
 	if err != nil {
 		return err
 	}
 	if toStdout {
 		// the type goes to stderr, so it stays out of a redirected file and still reaches the terminal
-		fmt.Fprintf(os.Stderr, "This is a %s file. It's a readable copy of a private document: delete it once you've reviewed it.\n", media.Extension(ctype))
-		_, err = os.Stdout.Write(data)
+		fmt.Fprintf(os.Stderr, "This is a %s file. It's a readable copy of a private document: delete it once you've reviewed it.\n", media.Extension(doc.ContentType))
+		_, err = os.Stdout.Write(doc.Data)
 		return err
 	}
-	name := handle + "-document" + media.Extension(ctype)
-	out, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+	out, err := os.OpenFile(doc.Name, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-	if _, err := out.Write(data); err != nil {
+	if _, err := out.Write(doc.Data); err != nil {
 		return err
 	}
-	fmt.Printf("Saved %s (%s). This is a readable copy of a private document: delete it once you've reviewed it.\n", name, ctype)
+	fmt.Printf("Saved %s (%s). This is a readable copy of a private document: delete it once you've reviewed it.\n", doc.Name, doc.ContentType)
 	return nil
 }
 
 func reports(ctx context.Context, pool *pgxpool.Pool) error {
-	rows, err := pool.Query(ctx, `SELECT r.id, r.target_kind, r.target_id, u.handle, r.reason, r.created_at FROM reports r JOIN users u ON u.id = r.reporter_id
-		WHERE r.resolved_at IS NULL ORDER BY r.created_at`)
+	list, err := admin.Reports(ctx, pool)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	w := table()
 	fmt.Fprintln(w, "ID\tKIND\tTARGET\tREPORTED BY\tREASON\tWHEN")
-	for rows.Next() {
-		var id, kind, target, handle, reason string
-		var at time.Time
-		if err := rows.Scan(&id, &kind, &target, &handle, &reason, &at); err != nil {
-			return err
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t@%s\t%s\t%s\n", id, kind, target, handle, reason, at.Format("2006-01-02"))
-	}
-	if err := rows.Err(); err != nil {
-		return err
+	for _, r := range list {
+		fmt.Fprintf(w, "%s\t%s\t%s\t@%s\t%s\t%s\n", r.ID, r.Kind, r.TargetID, r.Reporter, r.Reason, r.At.Format("2006-01-02"))
 	}
 	return w.Flush()
 }
@@ -234,111 +224,57 @@ func resolveReport(ctx context.Context, pool *pgxpool.Pool, args []string) error
 	if err != nil {
 		return err
 	}
-	tag, err := pool.Exec(ctx, `UPDATE reports SET resolved_at = now() WHERE id = $1 AND resolved_at IS NULL`, id)
-	if err != nil {
+	if err := admin.ResolveReport(ctx, pool, admin.CLI, id); err != nil {
 		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("no open report %s", id)
 	}
 	fmt.Println("Report resolved")
 	return nil
 }
 
-const payoutDueWhere = `o.status = 'DELIVERED' AND o.payout_paid_at IS NULL AND o.delivered_at < now() - interval '2 days'`
-
 func payoutsDue(ctx context.Context, pool *pgxpool.Pool) error {
-	fmt.Println("PAYOUTS DUE (delivered over 2 days ago, not yet paid)")
-	rows, err := pool.Query(ctx, `SELECT b.handle, b.payouts ->> 'provider', b.payouts ->> 'bank', count(*), sum(o.payout)
-		FROM orders o JOIN brands b ON b.id = o.brand_id WHERE `+payoutDueWhere+` GROUP BY b.id ORDER BY sum(o.payout) DESC`)
+	m, err := admin.GetMoney(ctx, pool)
 	if err != nil {
 		return err
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Println("PAYOUTS DUE (delivered over 2 days ago, not yet paid)")
+	w := table()
 	fmt.Fprintln(w, "BRAND\tPROVIDER\tBANK\tORDERS\tAMOUNT")
-	for rows.Next() {
-		var handle string
-		var provider, bank *string
-		var orders, amount int64
-		if err := rows.Scan(&handle, &provider, &bank, &orders, &amount); err != nil {
-			rows.Close()
-			return err
-		}
-		fmt.Fprintf(w, "@%s\t%s\t%s\t%d\t$%.2f\n", handle, deref(provider), deref(bank), orders, float64(amount)/100)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
+	for _, p := range m.Payouts {
+		fmt.Fprintf(w, "@%s\t%s\t%s\t%d\t%s\n", p.Handle, p.Provider, p.Bank, p.Orders, admin.Dollars(p.Amount))
 	}
 	if err := w.Flush(); err != nil {
 		return err
 	}
 
 	fmt.Println("\nREFUNDS DUE (returns approved)")
-	rows, err = pool.Query(ctx, `SELECT o.seq, b.handle, u.handle, o.subtotal - o.discount + o.shipping FROM orders o
-		JOIN brands b ON b.id = o.brand_id JOIN users u ON u.id = o.user_id WHERE o.refund_status = 'due' ORDER BY o.seq`)
-	if err != nil {
-		return err
-	}
-	w = tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	w = table()
 	fmt.Fprintln(w, "ORDER\tBRAND\tCUSTOMER\tAMOUNT")
-	for rows.Next() {
-		var seq int64
-		var brand, customer string
-		var amount int
-		if err := rows.Scan(&seq, &brand, &customer, &amount); err != nil {
-			rows.Close()
-			return err
-		}
-		fmt.Fprintf(w, "WW-%d\t@%s\t@%s\t$%.2f\n", seq, brand, customer, float64(amount)/100)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
+	for _, r := range m.Refunds {
+		fmt.Fprintf(w, "%s\t@%s\t@%s\t%s\n", r.Order, r.Brand, r.Customer, admin.Dollars(r.Amount))
 	}
 	if err := w.Flush(); err != nil {
 		return err
 	}
 
 	fmt.Println("\nNEEDS ATTENTION (money arrived but the order wasn't fulfilled: refund or re-fulfil by hand)")
-	rows, err = pool.Query(ctx, `SELECT number, status, email, total FROM checkouts WHERE status IN ('paid_after_expiry', 'amount_mismatch') ORDER BY created_at`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	w = tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	w = table()
 	fmt.Fprintln(w, "CHECKOUT\tPROBLEM\tEMAIL\tTOTAL")
-	for rows.Next() {
-		var number, status, email string
-		var total int
-		if err := rows.Scan(&number, &status, &email, &total); err != nil {
-			return err
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t$%.2f\n", number, status, email, float64(total)/100)
-	}
-	if err := rows.Err(); err != nil {
-		return err
+	for _, a := range m.Attention {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", a.Checkout, a.Problem, a.Email, admin.Dollars(a.Total))
 	}
 	return w.Flush()
 }
 
 func markRefundDone(ctx context.Context, pool *pgxpool.Pool, args []string) error {
-	id, err := needArg(args, "order")
+	order, err := needArg(args, "order")
 	if err != nil {
 		return err
 	}
-	seq, ok := domain.ParseOrderID(id)
-	if !ok {
-		return fmt.Errorf("%q isn't an order id", id)
-	}
-	tag, err := pool.Exec(ctx, `UPDATE orders SET refund_status = 'done' WHERE seq = $1 AND refund_status = 'due'`, seq)
+	id, err := admin.MarkRefundDone(ctx, pool, admin.CLI, order)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("no refund due on %s", id)
-	}
-	fmt.Println("Refund recorded for", domain.ShopperOrderID(seq))
+	fmt.Println("Refund recorded for", id)
 	return nil
 }
 
@@ -347,11 +283,10 @@ func markPayoutPaid(ctx context.Context, pool *pgxpool.Pool, args []string) erro
 	if err != nil {
 		return err
 	}
-	tag, err := pool.Exec(ctx, `UPDATE orders o SET payout_paid_at = now() FROM brands b
-		WHERE b.id = o.brand_id AND b.handle = $1 AND `+payoutDueWhere, handle)
+	orders, total, err := admin.MarkPayoutPaid(ctx, pool, admin.CLI, handle, nil)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Marked %d orders as paid out for @%s\n", tag.RowsAffected(), handle)
+	fmt.Printf("Marked %d orders (%s) as paid out for @%s\n", orders, admin.Dollars(total), handle)
 	return nil
 }

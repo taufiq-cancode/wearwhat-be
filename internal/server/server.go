@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"wearwhat-be/internal/account"
+	"wearwhat-be/internal/admin"
 	"wearwhat-be/internal/app"
 	"wearwhat-be/internal/auth"
 	"wearwhat-be/internal/catalog"
@@ -77,7 +78,9 @@ func New(d *app.Deps) *Server {
 	commerceSvc.Routes(router)
 	inboxSvc.Routes(router)
 	studioSvc.Routes(router)
-	(&media.Service{Deps: d, Store: media.NewStore(d.Cfg)}).Routes(router)
+	store := media.NewStore(d.Cfg)
+	(&media.Service{Deps: d, Store: store}).Routes(router)
+	(&admin.Service{Deps: d, Store: store}).Routes(router)
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := d.DB.Ping(r.Context()); err != nil {

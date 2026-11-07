@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,12 @@ var studioRoutes = []string{
 	"GET /studio/notifications", "GET /studio/notifications/unread-count", "POST /studio/notifications/read", "POST /studio/notifications/x/action",
 }
 
+var adminRoutes = []string{
+	"GET /admin/overview", "GET /admin/brands", "GET /admin/brands/x", "GET /admin/brands/x/document",
+	"POST /admin/brands/x/verify", "POST /admin/brands/x/reject", "GET /admin/reports", "POST /admin/reports/x/resolve",
+	"GET /admin/money", "POST /admin/payouts/x/paid", "POST /admin/refunds/WW-1/done",
+}
+
 func split(route string) (string, string) {
 	parts := strings.SplitN(route, " ", 2)
 	return parts[0], parts[1]
@@ -57,10 +64,23 @@ func body(method string) any {
 func TestSignedOutGets401Everywhere(t *testing.T) {
 	e := newEnv(t)
 	anon := e.anon()
-	for _, route := range append(append([]string{}, userRoutes...), studioRoutes...) {
+	for _, route := range slices.Concat(userRoutes, studioRoutes, adminRoutes) {
 		method, path := split(route)
 		if got, raw := anon.raw(method, path, body(method)); got != 401 {
 			t.Errorf("%s: status %d, want 401: %s", route, got, raw)
+		}
+	}
+}
+
+func TestAdminRoutesAreHiddenFromEveryoneElse(t *testing.T) {
+	// a shopper and a brand owner (whose team role is the highest there is) both get "not found"
+	e := newEnv(t)
+	for _, c := range []*client{e.shopper(), e.brandOwner()} {
+		for _, route := range adminRoutes {
+			method, path := split(route)
+			if got, raw := c.raw(method, path, body(method)); got != 404 {
+				t.Errorf("%s: status %d, want 404: %s", route, got, raw)
+			}
 		}
 	}
 }

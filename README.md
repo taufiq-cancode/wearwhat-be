@@ -156,28 +156,41 @@ For launch, switch to a fresh database and live Paystack keys. Otherwise your te
 
 ## Operating it
 
-There are no admin screens yet. These tasks use the admin tool. On Render, open the service's Shell tab and run `cd /app` first. Locally, use `go run ./cmd/wearwhat` in place of `./wearwhat`, which reads `.env`.
+Day to day, use the **admin panel** at `/admin` (for example `https://www.wearwhat.site/admin`). It covers brand review, shopper reports and money, and every change is logged with who made it. Anyone who isn't an admin gets "not found" there.
+
+### Make yourself an admin
+
+Admin is a flag on an ordinary account, granted with the admin tool. Sign up on the site first, then run the tool where the API runs. On Railway, install the [Railway CLI](https://docs.railway.com/guides/cli) (`npm i -g @railway/cli`), run `railway login` and `railway link` once (pick the API service), then `railway ssh` and `cd /app`. The container already has the production variables. Locally, use `go run ./cmd/wearwhat` in place of `./wearwhat`, which reads `.env`.
+
+```bash
+./wearwhat make-admin you@example.com
+```
+
+Removing someone's admin takes effect on their very next request. Treat admin accounts with care: they can read brands' private documents and record payouts, so give them strong passwords.
+
+### The admin tool
+
+Everything the panel does also works from the command line, using the same code:
 
 ```bash
 ./wearwhat                          # lists every command
+./wearwhat make-admin <email>
+./wearwhat remove-admin <email>
+./wearwhat admins                   # who can use the admin panel
 ./wearwhat brands-in-review
 ./wearwhat brand-document <handle>  # saves a readable copy of their private document in this folder
 ./wearwhat verify-brand <handle>    # they stay hidden from shoppers until this
+./wearwhat reject-brand <handle>
 ./wearwhat reports                  # what shoppers have reported
+./wearwhat resolve-report <id>
 ./wearwhat payouts-due              # what you owe brands, refunds due, payments to check
 ./wearwhat mark-payout-paid <handle>
 ./wearwhat mark-refund-done <order>
 ```
 
-**Reviewing a brand's document.** Documents are encrypted before they reach Cloudinary, so downloading one from Cloudinary's dashboard only gets you scrambled data. A copy saved in Render's Shell stays on the server, where you can't open it. To bring it to your computer, add your SSH key to your Render account and run this from Git Bash, using the SSH address on the service's Connect menu:
+**Reviewing a brand's document.** Documents are encrypted before they reach Cloudinary, so downloading one from Cloudinary's dashboard only gets you scrambled data. Open it from the brand's page in the admin panel instead. The server decrypts it and your browser shows it in a new tab without saving it anywhere. `brand-document` saves a copy on whichever machine runs the tool. On Railway that's the server, where you can't open it, so use the panel there.
 
-```bash
-ssh <service-address> "cd /app && ./wearwhat brand-document <handle> --stdout" > document.pdf
-```
-
-Use Git Bash or Command Prompt for this, not Windows PowerShell, whose `>` corrupts binary files. The command prints the file's real type, because some documents are photos rather than PDFs, so rename it if needed. Delete your copy once you've reviewed it.
-
-**Money movement is deliberately manual.** The system calculates and records what's owed, but you send payouts and refunds yourself, then record them with the last two commands.
+**Money movement is deliberately manual.** The system calculates and records what's owed, but you send payouts and refunds yourself, then record them in the panel's Money screen. To mark a payout as paid, the panel sends the amount you saw. If more orders have come due since then, it refuses and asks you to refresh, so you never record more than you sent.
 
 ## Layout
 

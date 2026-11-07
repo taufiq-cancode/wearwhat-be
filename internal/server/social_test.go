@@ -2,6 +2,8 @@ package server_test
 
 import (
 	"context"
+	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -817,6 +819,10 @@ func TestBrandVerificationGate(t *testing.T) {
 	if len(brands) != 0 {
 		t.Errorf("listed: %d", len(brands))
 	}
+	shopper.ok("GET", "/brands?q="+owner.brandHandle, nil, &brands)
+	if len(brands) != 0 {
+		t.Errorf("found by search while in review: %d", len(brands))
+	}
 	// ...but the owner can keep setting up
 	owner.ok("GET", "/brands/"+owner.brandHandle, nil, nil)
 	owner.ok("GET", "/products/"+pid, nil, nil)
@@ -826,12 +832,49 @@ func TestBrandVerificationGate(t *testing.T) {
 	}
 	shopper.ok("GET", "/brands/"+owner.brandHandle, nil, nil)
 	shopper.ok("GET", "/products/"+pid, nil, nil)
+	shopper.ok("GET", "/brands?q="+owner.brandHandle, nil, &brands)
+	if len(brands) != 1 {
+		t.Errorf("verified brand not found by search: %d", len(brands))
+	}
 	owner.ok("GET", "/studio/settings", nil, &settings)
 	if !settings.Verified {
 		t.Error("should be verified")
 	}
 	if msg := owner.status(409, "POST", "/studio/onboarding", m{}); !strings.Contains(msg, "already") {
 		t.Errorf("second brand: %q", msg)
+	}
+}
+
+func TestBrandSearch(t *testing.T) {
+	// a brand with no products yet must still be findable, or a shopper has no way in
+	e := newEnv(t)
+	a := e.brandOwner()
+	b := e.brandOwner()
+	c := e.shopper()
+	handles := func(q string) []string {
+		t.Helper()
+		var res []struct {
+			Handle string `json:"handle"`
+		}
+		c.ok("GET", "/brands?q="+url.QueryEscape(q), nil, &res)
+		out := []string{}
+		for _, r := range res {
+			out = append(out, r.Handle)
+		}
+		return out
+	}
+	for _, q := range []string{a.brandHandle, "@" + a.brandHandle, "  " + strings.ToUpper(a.brandHandle) + " "} {
+		if got := handles(q); len(got) == 0 || got[0] != a.brandHandle {
+			t.Errorf("q=%q: %v, want %s first", q, got, a.brandHandle)
+		}
+	}
+	// names match too, case-insensitively
+	got := handles("BRAND")
+	if !slices.Contains(got, a.brandHandle) || !slices.Contains(got, b.brandHandle) {
+		t.Errorf("by name: %v", got)
+	}
+	if got := handles("no-such-brand-anywhere"); len(got) != 0 {
+		t.Errorf("no match: %v", got)
 	}
 }
 

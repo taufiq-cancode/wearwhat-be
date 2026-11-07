@@ -266,6 +266,7 @@ type Me struct {
 	ShopFor      string     `json:"shopFor"`
 	Address      *Address   `json:"address"`
 	PaymentLabel string     `json:"paymentLabel"`
+	Admin        bool       `json:"admin"`
 }
 
 type PaymentMethod struct {

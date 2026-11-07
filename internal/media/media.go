@@ -55,7 +55,8 @@ type Saved struct {
 // Storage is where file bytes live: Cloudinary in production, local disk in development.
 type Storage interface {
 	Save(ctx context.Context, f NewFile, r io.Reader) (Saved, error)
-	// Fetch returns a private file's stored bytes. It's for the admin tool, not for HTTP routes.
+	// Fetch returns a private file's stored bytes. Only admin code (the admin tool and the admin
+	// panel's routes) may call it; no shopper- or brand-facing route serves private files.
 	Fetch(ctx context.Context, path string) ([]byte, error)
 }
 
